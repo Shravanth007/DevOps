@@ -1,0 +1,11 @@
+# ZAP Scanning Rules Configuration
+# Format: action status url [extra]
+# Actions: IGNORE, WARN, FAIL
+# Status codes or vulnerability IDs
+
+# Ignore informational alerts
+IGNORE	WARN	http://localhost:8080	10096
+IGNORE	WARN	http://localhost:8080	10027
+
+# Fail on high severity issues
+FAIL	WARN	http://localhost:8080	.*

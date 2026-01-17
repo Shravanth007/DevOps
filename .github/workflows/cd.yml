@@ -1,0 +1,161 @@
+name: CD Pipeline - Continuous Deployment
+
+# Trigger Configuration
+on:
+  workflow_run:
+    workflows: ["CI Pipeline - Continuous Integration"]
+    types:
+      - completed
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-demo-app
+  KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+
+jobs:
+  # Job 1: Deploy to Kubernetes
+  deploy-kubernetes:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+      
+      - name: Configure Kubernetes Context
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+      
+      - name: Update Deployment Image
+        run: |
+          sed -i "s|IMAGE_PLACEHOLDER|${{ env.DOCKER_IMAGE_NAME }}:latest|g" k8s/deployment.yaml
+      
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+      
+      - name: Wait for Deployment Rollout
+        run: |
+          kubectl rollout status deployment/devops-demo-app -n devops-demo --timeout=5m
+      
+      - name: Verify Deployment
+        run: |
+          kubectl get pods -n devops-demo
+          kubectl get services -n devops-demo
+      
+      - name: Get Service URL
+        run: |
+          echo "Application deployed successfully!"
+          kubectl get service devops-demo-service -n devops-demo
+  
+  # Job 2: DAST - Dynamic Application Security Testing
+  dast-scan:
+    name: DAST Security Scan
+    runs-on: ubuntu-latest
+    needs: [deploy-kubernetes]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Wait for Application Startup
+        run: sleep 60
+      
+      - name: Get Application URL
+        id: get-url
+        run: |
+          # For demo purposes, using localhost or service URL
+          # In production, this would be your actual service endpoint
+          echo "APP_URL=http://localhost:8080" >> $GITHUB_OUTPUT
+      
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: ${{ steps.get-url.outputs.APP_URL }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+          fail_action: false
+      
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-scan-report
+          path: report_html.html
+  
+  # Job 3: Smoke Tests
+  smoke-tests:
+    name: Post-Deployment Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-kubernetes]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+      
+      - name: Configure Kubernetes Context
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+      
+      - name: Port Forward to Service
+        run: |
+          kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo &
+          sleep 10
+      
+      - name: Test Health Endpoint
+        run: |
+          for i in {1..5}; do
+            if curl -f http://localhost:8080/api/health; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 5
+          done
+          exit 1
+      
+      - name: Test Version Endpoint
+        run: |
+          curl -f http://localhost:8080/api/version
+          echo "✅ Version endpoint working!"
+      
+      - name: Test Actuator Health
+        run: |
+          curl -f http://localhost:8080/actuator/health
+          echo "✅ Actuator health check passed!"
+  
+  # Job 4: Deployment Summary
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [deploy-kubernetes, dast-scan, smoke-tests]
+    if: always()
+    
+    steps:
+      - name: Generate Deployment Report
+        run: |
+          echo "# 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Kubernetes Deployment: ${{ needs.deploy-kubernetes.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ DAST Scan: ${{ needs.dast-scan.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Smoke Tests: ${{ needs.smoke-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Image Information" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: ${{ env.DOCKER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
