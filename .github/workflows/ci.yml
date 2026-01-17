@@ -8,6 +8,12 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+# Global permissions
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 env:
   JAVA_VERSION: '17'
   MAVEN_OPTS: -Xmx1024m
@@ -46,16 +52,16 @@ jobs:
     name: CodeQL Security Scan
     runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
       security-events: write
+      actions: read
     
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
       
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: java
           queries: security-and-quality
@@ -71,7 +77,7 @@ jobs:
         run: mvn clean compile -DskipTests
       
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:java"
   
@@ -166,6 +172,9 @@ jobs:
     name: Docker Build & Image Scan
     runs-on: ubuntu-latest
     needs: [build]
+    permissions:
+      contents: read
+      security-events: write
     
     steps:
       - name: Checkout Code
@@ -188,7 +197,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
       
       - name: Upload Trivy Results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
