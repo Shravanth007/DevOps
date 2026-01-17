@@ -256,36 +256,43 @@ jobs:
         if: always()
         run: docker stop test-container && docker rm test-container
   
-  # Job 8: Push to DockerHub
+    # Job 8: Push to DockerHub
   docker-push:
     name: Push to DockerHub
     runs-on: ubuntu-latest
     needs: [container-test]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
+
     steps:
       - name: Download Docker Image
         uses: actions/download-artifact@v4
         with:
           name: docker-image
-      
+
       - name: Load Docker Image
         run: docker load -i devops-demo-app.tar
-      
-      - name: Tag Docker Image as Latest
-        run: docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} ${{ env.DOCKER_IMAGE_NAME }}:latest
-      
+
+      - name: Show Docker images
+        run: docker images
+
+      - name: Tag loaded image correctly
+        run: |
+          IMAGE_ID=$(docker images --quiet | head -n 1)
+          echo "Loaded image id: $IMAGE_ID"
+          docker tag $IMAGE_ID ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          docker tag $IMAGE_ID ${{ env.DOCKER_IMAGE_NAME }}:latest
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
+
       - name: Push Docker Image
         run: |
           docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
           docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
-      
+
       - name: Image Pushed Successfully
         run: |
           echo "✅ Docker image pushed successfully!"
