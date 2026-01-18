@@ -43,3 +43,9 @@ dependency-check-report.json
 
 # Docker
 .dockerignore
+
+# GitHub Actions Self-Hosted Runner
+actions-runner/
+
+# Temporary kubeconfig files
+kubeconfig-*.yaml
