@@ -125,10 +125,17 @@ jobs:
           # Kill any existing port-forwards on 8080
           Get-Job | Where-Object { $_.Command -like '*port-forward*' } | Stop-Job -PassThru | Remove-Job -Force
           
-          # Start fresh port-forward
-          Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo } | Out-Null
-          Start-Sleep -Seconds 15
-          Write-Host "Port-forward established on localhost:8080"
+          # Start fresh port-forward and keep it alive
+          $job = Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo }
+          Start-Sleep -Seconds 20
+          
+          # Verify the job is running
+          if ($job.State -ne 'Running') {
+            Write-Host "❌ Port-forward job failed to start"
+            Get-Job | Receive-Job
+            exit 1
+          }
+          Write-Host "✅ Port-forward established on localhost:8080 (Job: $($job.Id))"
       
       - name: Test Health Endpoint
         shell: powershell
