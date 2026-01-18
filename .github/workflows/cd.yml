@@ -69,22 +69,35 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
       
-      - name: Wait for Application Startup
-        shell: powershell
-        run: Start-Sleep -Seconds 60
-      
-      - name: Get Application URL
-        id: get-url
+      - name: Setup Port Forward
         shell: powershell
         run: |
-          # Get the Minikube service URL
-          $serviceUrl = minikube service devops-demo-service -n devops-demo --url
-          "APP_URL=$serviceUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Start port-forward in background
+          Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8081:8080 -n devops-demo } | Out-Null
+          Start-Sleep -Seconds 15
+          Write-Host "Port-forward established on localhost:8081"
+      
+      - name: Wait for Application Startup
+        shell: powershell
+        run: |
+          $maxAttempts = 10
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8081/api/health" -UseBasicParsing -TimeoutSec 5
+              if ($response.StatusCode -eq 200) {
+                Write-Host "✅ Application is ready!"
+                exit 0
+              }
+            } catch {
+              Write-Host "Waiting for app... attempt $i/$maxAttempts"
+              Start-Sleep -Seconds 6
+            }
+          }
       
       - name: Run OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.10.0
         with:
-          target: ${{ steps.get-url.outputs.APP_URL }}
+          target: 'http://localhost:8081'
           rules_file_name: '.zap/rules.tsv'
           cmd_options: '-a'
           fail_action: false
@@ -109,25 +122,32 @@ jobs:
       - name: Port Forward to Service
         shell: powershell
         run: |
-          Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo }
-          Start-Sleep -Seconds 10
+          # Kill any existing port-forwards on 8080
+          Get-Job | Where-Object { $_.Command -like '*port-forward*' } | Stop-Job -PassThru | Remove-Job -Force
+          
+          # Start fresh port-forward
+          Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo } | Out-Null
+          Start-Sleep -Seconds 15
+          Write-Host "Port-forward established on localhost:8080"
       
       - name: Test Health Endpoint
         shell: powershell
         run: |
-          $maxAttempts = 5
+          $maxAttempts = 10
           for ($i = 1; $i -le $maxAttempts; $i++) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8080/api/health" -UseBasicParsing
+              $response = Invoke-WebRequest -Uri "http://localhost:8080/api/health" -UseBasicParsing -TimeoutSec 5
               if ($response.StatusCode -eq 200) {
                 Write-Host "✅ Health check passed!"
+                Write-Host $response.Content
                 exit 0
               }
             } catch {
-              Write-Host "Attempt $i failed, retrying..."
-              Start-Sleep -Seconds 5
+              Write-Host "Attempt $i/$maxAttempts failed, retrying..."
+              Start-Sleep -Seconds 6
             }
           }
+          Write-Host "❌ Health check failed after $maxAttempts attempts"
           exit 1
       
       - name: Test Version Endpoint
