@@ -17,103 +17,72 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
 
     steps:
-      # -----------------------------
-      # 1) Checkout
-      # -----------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # 2) Start Minikube (critical)
-      # -----------------------------
       - name: Start Minikube
         shell: powershell
         run: |
-          Write-Host "🔄 Checking Minikube status..."
-          minikube status
-          
-          Write-Host "🚀 Starting Minikube..."
-          minikube start --driver=docker
-          
-          Write-Host "✅ Minikube started successfully"
+          Write-Host "Checking Minikube status..."
           minikube status
 
-      # -----------------------------
-      # 3) Verify Cluster
-      # -----------------------------
+          Write-Host "Starting Minikube..."
+          minikube start --driver=docker
+
+          Write-Host "Minikube started successfully"
+          minikube status
+
       - name: Verify Cluster Connection
         shell: powershell
         run: |
-          Write-Host "🔍 Verifying Kubernetes cluster..."
+          Write-Host "Verifying Kubernetes cluster..."
           kubectl config current-context
           kubectl get nodes
           kubectl cluster-info
 
-      # -----------------------------
-      # 4) Replace Docker image placeholder
-      # -----------------------------
       - name: Update Deployment Image
         shell: powershell
         run: |
-          Write-Host "🖼️ Updating image in deployment.yaml"
+          Write-Host "Updating image in deployment.yaml"
           (Get-Content k8s/deployment.yaml) -replace 'IMAGE_PLACEHOLDER', '${{ env.DOCKER_IMAGE_NAME }}:latest' | Set-Content k8s/deployment.yaml
-          Write-Host "✅ Updated deployment image to ${{ env.DOCKER_IMAGE_NAME }}:latest"
+          Write-Host "Updated deployment image successfully"
 
-      # -----------------------------
-      # 5) Deploy manifests
-      # -----------------------------
       - name: Deploy to Kubernetes
         shell: powershell
         run: |
-          Write-Host "📦 Applying Kubernetes manifests..."
+          Write-Host "Applying Kubernetes manifests..."
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
 
-      # -----------------------------
-      # 6) Rollout Status + Logs
-      # -----------------------------
       - name: Wait for Deployment Rollout
         shell: powershell
         run: |
-          Write-Host "⏳ Waiting for rollout..."
+          Write-Host "Waiting for rollout..."
           kubectl rollout status deployment/devops-demo-app -n devops-demo --timeout=5m
 
-          Write-Host ""
-          Write-Host "✅ Pods:"
+          Write-Host "Pods:"
           kubectl get pods -n devops-demo -o wide
 
-          Write-Host ""
-          Write-Host "✅ Services:"
+          Write-Host "Services:"
           kubectl get svc -n devops-demo -o wide
 
-      # -----------------------------
-      # 7) Smoke Tests via port-forward
-      #    (Stable method: same step)
-      # -----------------------------
       - name: Smoke Tests (Kubernetes)
         shell: powershell
         run: |
-          Write-Host "🧪 Running smoke tests..."
-          Write-Host "⚠️ Using port-forward on localhost:18080 (avoids 8080 conflicts)"
+          Write-Host "Running smoke tests..."
+          Write-Host "Using port-forward on localhost:18080"
 
-          # Cleanup any previous kubectl port-forward processes (optional but helpful)
-          Get-Process kubectl -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*kubectl*" } | ForEach-Object {
-            # don't kill normal kubectl calls, only long port-forward ones, so this is kept minimal
-          }
-
-          # Start port-forward and keep handle
           $pf = Start-Process -PassThru -NoNewWindow -FilePath "kubectl" -ArgumentList "port-forward svc/devops-demo-service 18080:8080 -n devops-demo"
 
           Start-Sleep -Seconds 10
 
           try {
-            # Health test (retry)
             $maxAttempts = 15
             for ($i = 1; $i -le $maxAttempts; $i++) {
               try {
                 $r = Invoke-WebRequest -Uri "http://localhost:18080/api/health" -UseBasicParsing -TimeoutSec 10
-                Write-Host "✅ HEALTH OK"
+                Write-Host "Health OK"
                 Write-Host $r.Content
                 break
               } catch {
@@ -123,39 +92,32 @@ jobs:
               }
             }
 
-            # Version endpoint
             $v = Invoke-WebRequest -Uri "http://localhost:18080/api/version" -UseBasicParsing -TimeoutSec 10
-            Write-Host "✅ VERSION OK"
+            Write-Host "Version OK"
             Write-Host $v.Content
 
-            # Actuator health
             $a = Invoke-WebRequest -Uri "http://localhost:18080/actuator/health" -UseBasicParsing -TimeoutSec 10
-            Write-Host "✅ ACTUATOR OK"
+            Write-Host "Actuator OK"
             Write-Host $a.Content
 
-            Write-Host ""
-            Write-Host "🎉 All smoke tests PASSED"
+            Write-Host "All smoke tests PASSED"
           }
           finally {
             if ($pf -and $pf.Id) {
               Stop-Process -Id $pf.Id -Force -ErrorAction SilentlyContinue
-              Write-Host "🧹 Port-forward stopped"
+              Write-Host "Port-forward stopped"
             }
           }
 
-      # -----------------------------
-      # 8) Final Summary
-      # -----------------------------
       - name: Deployment Summary
         shell: powershell
         if: always()
         run: |
-          "## 🚀 Deployment Summary" >> $env:GITHUB_STEP_SUMMARY
+          "## Deployment Summary" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "- Workflow: deploy-to-k8s" >> $env:GITHUB_STEP_SUMMARY
           "- Cluster: minikube" >> $env:GITHUB_STEP_SUMMARY
           "- Image: ${{ env.DOCKER_IMAGE_NAME }}:latest" >> $env:GITHUB_STEP_SUMMARY
           "- SHA: ${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
-          "### Kubernetes Resources" >> $env:GITHUB_STEP_SUMMARY
-          "Pods and Services are deployed under namespace: devops-demo." >> $env:GITHUB_STEP_SUMMARY
+          "Namespace: devops-demo" >> $env:GITHUB_STEP_SUMMARY
