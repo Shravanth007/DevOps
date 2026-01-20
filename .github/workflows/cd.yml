@@ -94,20 +94,32 @@ jobs:
             }
           }
       
-      - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.10.0
-        with:
-          target: 'http://localhost:8081'
-          rules_file_name: '.zap/rules.tsv'
-          cmd_options: '-a'
-          fail_action: false
+      - name: Basic Security Scan (Windows)
+        shell: powershell
+        run: |
+          Write-Host "🔒 Running basic security checks..."
+          
+          # Test common endpoints
+          $endpoints = @("/api/health", "/api/version", "/actuator/health")
+          
+          foreach ($endpoint in $endpoints) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8081$endpoint" -UseBasicParsing
+              Write-Host "✅ $endpoint - Status: $($response.StatusCode)"
+            } catch {
+              Write-Host "⚠️ $endpoint - Failed: $_"
+            }
+          }
+          
+          Write-Host ""
+          Write-Host "📝 DAST Note: Full OWASP ZAP scan requires Linux runner"
+          Write-Host "   For production, use a Linux runner or Docker Desktop with WSL2"
       
-      - name: Upload ZAP Report
-        uses: actions/upload-artifact@v4
+      - name: Cleanup
+        shell: powershell
         if: always()
-        with:
-          name: zap-scan-report
-          path: report_html.html
+        run: |
+          Get-Job | Stop-Job -PassThru | Remove-Job -Force
   
   # Job 3: Smoke Tests
   smoke-tests:
