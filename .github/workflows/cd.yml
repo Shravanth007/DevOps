@@ -1,205 +1,89 @@
-name: CD Pipeline - Continuous Deployment
+name: deploy-to-k8s
 
-# Trigger Configuration
 on:
   workflow_run:
     workflows: ["CI Pipeline - Continuous Integration"]
-    types:
-      - completed
+    types: [completed]
     branches: [master, main]
   workflow_dispatch:
 
 env:
   DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-demo-app
-  KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
 
 jobs:
-  # Job 1: Deploy to Kubernetes
-  deploy-kubernetes:
-    name: Deploy to Kubernetes
+  deploy-to-k8s:
+    name: deploy-to-k8s
     runs-on: self-hosted
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      
+
       - name: Verify Cluster Connection
         shell: powershell
         run: |
           kubectl cluster-info
           kubectl get nodes
-      
+
       - name: Update Deployment Image
         shell: powershell
         run: |
           (Get-Content k8s/deployment.yaml) -replace 'IMAGE_PLACEHOLDER', '${{ env.DOCKER_IMAGE_NAME }}:latest' | Set-Content k8s/deployment.yaml
-      
+
       - name: Deploy to Kubernetes
         shell: powershell
         run: |
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
-      
+
       - name: Wait for Deployment Rollout
         shell: powershell
         run: |
           kubectl rollout status deployment/devops-demo-app -n devops-demo --timeout=5m
-      
-      - name: Verify Deployment
-        shell: powershell
-        run: |
           kubectl get pods -n devops-demo
-          kubectl get services -n devops-demo
-      
-      - name: Get Service URL
+          kubectl get svc -n devops-demo
+
+      # ---- Port forward (single stable version) ----
+      - name: Start Port Forward
         shell: powershell
         run: |
-          Write-Host "Application deployed successfully!"
-          kubectl get service devops-demo-service -n devops-demo
-  
-  # Job 2: DAST - Dynamic Application Security Testing
-  dast-scan:
-    name: DAST Security Scan
-    runs-on: self-hosted
-    needs: [deploy-kubernetes]
-    
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      
-      - name: Setup Port Forward
-        shell: powershell
-        run: |
-          # Start port-forward in background
-          Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8081:8080 -n devops-demo } | Out-Null
-          Start-Sleep -Seconds 15
-          Write-Host "Port-forward established on localhost:8081"
-      
-      - name: Wait for Application Startup
+          Write-Host "Starting port-forward on 8080..."
+          Start-Process -NoNewWindow -FilePath "kubectl" -ArgumentList "port-forward svc/devops-demo-service 8080:8080 -n devops-demo" 
+          Start-Sleep -Seconds 10
+          netstat -ano | findstr :8080
+
+      - name: Smoke Test - Health
         shell: powershell
         run: |
           $maxAttempts = 10
           for ($i = 1; $i -le $maxAttempts; $i++) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8081/api/health" -UseBasicParsing -TimeoutSec 5
-              if ($response.StatusCode -eq 200) {
-                Write-Host "✅ Application is ready!"
-                exit 0
-              }
+              $r = Invoke-WebRequest -Uri "http://localhost:8080/api/health" -UseBasicParsing -TimeoutSec 5
+              Write-Host "✅ HEALTH OK"
+              Write-Host $r.Content
+              exit 0
             } catch {
               Write-Host "Waiting for app... attempt $i/$maxAttempts"
               Start-Sleep -Seconds 6
             }
           }
-      
-      - name: Basic Security Scan (Windows)
-        shell: powershell
-        run: |
-          Write-Host "🔒 Running basic security checks..."
-          
-          # Test common endpoints
-          $endpoints = @("/api/health", "/api/version", "/actuator/health")
-          
-          foreach ($endpoint in $endpoints) {
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8081$endpoint" -UseBasicParsing
-              Write-Host "✅ $endpoint - Status: $($response.StatusCode)"
-            } catch {
-              Write-Host "⚠️ $endpoint - Failed: $_"
-            }
-          }
-          
-          Write-Host ""
-          Write-Host "📝 DAST Note: Full OWASP ZAP scan requires Linux runner"
-          Write-Host "   For production, use a Linux runner or Docker Desktop with WSL2"
-      
-      - name: Cleanup
-        shell: powershell
-        if: always()
-        run: |
-          Get-Job | Stop-Job -PassThru | Remove-Job -Force
-  
-  # Job 3: Smoke Tests
-  smoke-tests:
-    name: Post-Deployment Smoke Tests
-    runs-on: self-hosted
-    needs: [deploy-kubernetes]
-    
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      
-      - name: Port Forward to Service
-        shell: powershell
-        run: |
-          # Kill any existing port-forwards on 8080
-          Get-Job | Where-Object { $_.Command -like '*port-forward*' } | Stop-Job -PassThru | Remove-Job -Force
-          
-          # Start fresh port-forward and keep it alive
-          $job = Start-Job -ScriptBlock { kubectl port-forward service/devops-demo-service 8080:8080 -n devops-demo }
-          Start-Sleep -Seconds 20
-          
-          # Verify the job is running
-          if ($job.State -ne 'Running') {
-            Write-Host "❌ Port-forward job failed to start"
-            Get-Job | Receive-Job
-            exit 1
-          }
-          Write-Host "✅ Port-forward established on localhost:8080 (Job: $($job.Id))"
-      
-      - name: Test Health Endpoint
-        shell: powershell
-        run: |
-          $maxAttempts = 10
-          for ($i = 1; $i -le $maxAttempts; $i++) {
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:8080/api/health" -UseBasicParsing -TimeoutSec 5
-              if ($response.StatusCode -eq 200) {
-                Write-Host "✅ Health check passed!"
-                Write-Host $response.Content
-                exit 0
-              }
-            } catch {
-              Write-Host "Attempt $i/$maxAttempts failed, retrying..."
-              Start-Sleep -Seconds 6
-            }
-          }
-          Write-Host "❌ Health check failed after $maxAttempts attempts"
+          Write-Host "❌ Health check failed"
           exit 1
-      
-      - name: Test Version Endpoint
+
+      - name: Smoke Test - Version
         shell: powershell
         run: |
-          $response = Invoke-WebRequest -Uri "http://localhost:8080/api/version" -UseBasicParsing
-          Write-Host "✅ Version endpoint working!"
-          Write-Host $response.Content
-      
-      - name: Test Actuator Health
+          $r = Invoke-WebRequest -Uri "http://localhost:8080/api/version" -UseBasicParsing
+          Write-Host "✅ VERSION OK"
+          Write-Host $r.Content
+
+      - name: Smoke Test - Actuator
         shell: powershell
         run: |
-          $response = Invoke-WebRequest -Uri "http://localhost:8080/actuator/health" -UseBasicParsing
-          Write-Host "✅ Actuator health check passed!"
-          Write-Host $response.Content
+          $r = Invoke-WebRequest -Uri "http://localhost:8080/actuator/health" -UseBasicParsing
+          Write-Host "✅ ACTUATOR OK"
+          Write-Host $r.Content
+
   
-  # Job 4: Deployment Summary
-  deployment-summary:
-    name: Deployment Summary
-    runs-on: self-hosted
-    needs: [deploy-kubernetes, dast-scan, smoke-tests]
-    if: always()
-    
-    steps:
-      - name: Generate Deployment Report
-        run: |
-          echo "# 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Deployment Status" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Kubernetes Deployment: ${{ needs.deploy-kubernetes.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ DAST Scan: ${{ needs.dast-scan.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Smoke Tests: ${{ needs.smoke-tests.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Image Information" >> $GITHUB_STEP_SUMMARY
-          echo "- Image: ${{ env.DOCKER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "- SHA: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
