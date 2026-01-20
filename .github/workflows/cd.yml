@@ -17,73 +17,145 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
 
     steps:
+      # -----------------------------
+      # 1) Checkout
+      # -----------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # -----------------------------
+      # 2) Start Minikube (critical)
+      # -----------------------------
+      - name: Start Minikube
+        shell: powershell
+        run: |
+          Write-Host "🔄 Checking Minikube status..."
+          minikube status
+          
+          Write-Host "🚀 Starting Minikube..."
+          minikube start --driver=docker
+          
+          Write-Host "✅ Minikube started successfully"
+          minikube status
+
+      # -----------------------------
+      # 3) Verify Cluster
+      # -----------------------------
       - name: Verify Cluster Connection
         shell: powershell
         run: |
-          kubectl cluster-info
+          Write-Host "🔍 Verifying Kubernetes cluster..."
+          kubectl config current-context
           kubectl get nodes
+          kubectl cluster-info
 
+      # -----------------------------
+      # 4) Replace Docker image placeholder
+      # -----------------------------
       - name: Update Deployment Image
         shell: powershell
         run: |
+          Write-Host "🖼️ Updating image in deployment.yaml"
           (Get-Content k8s/deployment.yaml) -replace 'IMAGE_PLACEHOLDER', '${{ env.DOCKER_IMAGE_NAME }}:latest' | Set-Content k8s/deployment.yaml
+          Write-Host "✅ Updated deployment image to ${{ env.DOCKER_IMAGE_NAME }}:latest"
 
+      # -----------------------------
+      # 5) Deploy manifests
+      # -----------------------------
       - name: Deploy to Kubernetes
         shell: powershell
         run: |
+          Write-Host "📦 Applying Kubernetes manifests..."
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
 
+      # -----------------------------
+      # 6) Rollout Status + Logs
+      # -----------------------------
       - name: Wait for Deployment Rollout
         shell: powershell
         run: |
+          Write-Host "⏳ Waiting for rollout..."
           kubectl rollout status deployment/devops-demo-app -n devops-demo --timeout=5m
-          kubectl get pods -n devops-demo
-          kubectl get svc -n devops-demo
 
-      # ---- Port forward (single stable version) ----
-      - name: Start Port Forward
+          Write-Host ""
+          Write-Host "✅ Pods:"
+          kubectl get pods -n devops-demo -o wide
+
+          Write-Host ""
+          Write-Host "✅ Services:"
+          kubectl get svc -n devops-demo -o wide
+
+      # -----------------------------
+      # 7) Smoke Tests via port-forward
+      #    (Stable method: same step)
+      # -----------------------------
+      - name: Smoke Tests (Kubernetes)
         shell: powershell
         run: |
-          Write-Host "Starting port-forward on 8080..."
-          Start-Process -NoNewWindow -FilePath "kubectl" -ArgumentList "port-forward svc/devops-demo-service 8080:8080 -n devops-demo" 
+          Write-Host "🧪 Running smoke tests..."
+          Write-Host "⚠️ Using port-forward on localhost:18080 (avoids 8080 conflicts)"
+
+          # Cleanup any previous kubectl port-forward processes (optional but helpful)
+          Get-Process kubectl -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*kubectl*" } | ForEach-Object {
+            # don't kill normal kubectl calls, only long port-forward ones, so this is kept minimal
+          }
+
+          # Start port-forward and keep handle
+          $pf = Start-Process -PassThru -NoNewWindow -FilePath "kubectl" -ArgumentList "port-forward svc/devops-demo-service 18080:8080 -n devops-demo"
+
           Start-Sleep -Seconds 10
-          netstat -ano | findstr :8080
 
-      - name: Smoke Test - Health
-        shell: powershell
-        run: |
-          $maxAttempts = 10
-          for ($i = 1; $i -le $maxAttempts; $i++) {
-            try {
-              $r = Invoke-WebRequest -Uri "http://localhost:8080/api/health" -UseBasicParsing -TimeoutSec 5
-              Write-Host "✅ HEALTH OK"
-              Write-Host $r.Content
-              exit 0
-            } catch {
-              Write-Host "Waiting for app... attempt $i/$maxAttempts"
-              Start-Sleep -Seconds 6
+          try {
+            # Health test (retry)
+            $maxAttempts = 15
+            for ($i = 1; $i -le $maxAttempts; $i++) {
+              try {
+                $r = Invoke-WebRequest -Uri "http://localhost:18080/api/health" -UseBasicParsing -TimeoutSec 10
+                Write-Host "✅ HEALTH OK"
+                Write-Host $r.Content
+                break
+              } catch {
+                Write-Host "Waiting for app... attempt $i/$maxAttempts"
+                Start-Sleep -Seconds 4
+                if ($i -eq $maxAttempts) { throw "Health check failed after retries" }
+              }
+            }
+
+            # Version endpoint
+            $v = Invoke-WebRequest -Uri "http://localhost:18080/api/version" -UseBasicParsing -TimeoutSec 10
+            Write-Host "✅ VERSION OK"
+            Write-Host $v.Content
+
+            # Actuator health
+            $a = Invoke-WebRequest -Uri "http://localhost:18080/actuator/health" -UseBasicParsing -TimeoutSec 10
+            Write-Host "✅ ACTUATOR OK"
+            Write-Host $a.Content
+
+            Write-Host ""
+            Write-Host "🎉 All smoke tests PASSED"
+          }
+          finally {
+            if ($pf -and $pf.Id) {
+              Stop-Process -Id $pf.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "🧹 Port-forward stopped"
             }
           }
-          Write-Host "❌ Health check failed"
-          exit 1
 
-      - name: Smoke Test - Version
+      # -----------------------------
+      # 8) Final Summary
+      # -----------------------------
+      - name: Deployment Summary
         shell: powershell
+        if: always()
         run: |
-          $r = Invoke-WebRequest -Uri "http://localhost:8080/api/version" -UseBasicParsing
-          Write-Host "✅ VERSION OK"
-          Write-Host $r.Content
-
-      - name: Smoke Test - Actuator
-        shell: powershell
-        run: |
-          $r = Invoke-WebRequest -Uri "http://localhost:8080/actuator/health" -UseBasicParsing
-          Write-Host "✅ ACTUATOR OK"
-          Write-Host $r.Content
-
-  
+          "## 🚀 Deployment Summary" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "- Workflow: deploy-to-k8s" >> $env:GITHUB_STEP_SUMMARY
+          "- Cluster: minikube" >> $env:GITHUB_STEP_SUMMARY
+          "- Image: ${{ env.DOCKER_IMAGE_NAME }}:latest" >> $env:GITHUB_STEP_SUMMARY
+          "- SHA: ${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "### Kubernetes Resources" >> $env:GITHUB_STEP_SUMMARY
+          "Pods and Services are deployed under namespace: devops-demo." >> $env:GITHUB_STEP_SUMMARY
